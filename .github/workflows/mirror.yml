@@ -30,7 +30,8 @@ jobs:
     env:
       UPSTREAM_REPO: LadybirdBrowser/ladybird
       UPSTREAM_WORKFLOW: build-release.yml
-      # Artifacts that are not useful to end users.
+      # Only mirror artifacts named ladybird*, excluding debug/symbol/source artifacts.
+      # (Runs also contain unrelated test artifacts whose zips hold thousands of files.)
       SKIP_PATTERN: "dbgsym|debuginfo|symbols|debug\\.flatpak|third-party-sources"
     steps:
       - name: Detect new upstream versions
@@ -134,7 +135,7 @@ jobs:
             gh api "repos/$UPSTREAM_REPO/actions/runs/$run_id/artifacts?per_page=100" --paginate \
               --jq '.artifacts[] | (.id | tostring) + "\t" + .name' \
               | while IFS=$'\t' read -r id name; do
-                  if echo "$name" | grep -Eq "$SKIP_PATTERN"; then
+                  if ! echo "$name" | grep -q "^ladybird" || echo "$name" | grep -Eq "$SKIP_PATTERN"; then
                     echo "  skip (not user-facing): $name"
                     continue
                   fi
@@ -154,6 +155,10 @@ jobs:
             while IFS= read -r f; do files+=("$f"); done < <(find . -maxdepth 1 -type f ! -name '*.tmp' -printf '%f\n' | sort)
             if [ "${#files[@]}" -eq 0 ]; then
               echo "::error::No user-facing artifacts found for $version"
+              exit 1
+            fi
+            if [ "${#files[@]}" -gt 30 ]; then
+              echo "::error::Unexpectedly many files (${#files[@]}) for $version — refusing to publish"
               exit 1
             fi
 
