@@ -1,0 +1,193 @@
+name: Mirror upstream release artifacts
+
+on:
+  schedule:
+    # Offset from the top of the hour to avoid congestion; runs even when idle (cheap no-op).
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      max_versions:
+        description: "Max new upstream versions to mirror in this run"
+        required: false
+        default: "3"
+      seed_all:
+        description: "Seed mode: mirror up to 10 newest versions"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      UPSTREAM_REPO: LadybirdBrowser/ladybird
+      UPSTREAM_WORKFLOW: build-release.yml
+      # Artifacts that are not useful to end users.
+      SKIP_PATTERN: "dbgsym|debuginfo|symbols|debug\\.flatpak|third-party-sources"
+    steps:
+      - name: Detect new upstream versions
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          runs="$(
+            gh api "repos/$UPSTREAM_REPO/actions/workflows/$UPSTREAM_WORKFLOW/runs?status=success&per_page=40" \
+              --jq '[
+                .workflow_runs[]
+                | select(.head_branch | test("^[0-9]{4}\\.[0-9]+\\.[0-9]+$"))
+                ]
+                | unique_by(.head_branch)
+                | map({
+                    version: .head_branch,
+                    run_id: (.id | tostring),
+                    url: .html_url,
+                    created: .created_at
+                  })
+                | sort_by(.created)
+                | reverse'
+          )"
+          echo "Upstream versions available: $(echo "$runs" | jq -r '.[].version' | tr '\n' ' ')"
+
+          existing="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name' || true)"
+
+          missing="$(echo "$runs" | jq --arg existing "$existing" '
+            [ .[] | select(.version as $v | $existing | split("\n") | index($v) | not) ]')"
+
+          count="$(echo "$missing" | jq 'length')"
+          echo "Versions not yet mirrored: $count"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.seed_all }}" = "true" ]; then
+            max=10
+          else
+            max="${{ inputs.max_versions || '3' }}"
+          fi
+
+          to_mirror="$(echo "$missing" | jq -c --argjson max "$max" '.[:$max]')"
+          echo "Mirroring now: $(echo "$to_mirror" | jq -r '.[].version' | tr '\n' ' ')"
+
+          {
+            echo "to_mirror=$to_mirror"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mirror versions
+        if: steps.detect.outputs.to_mirror != '[]'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MIRROR_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          to_mirror='${{ steps.detect.outputs.to_mirror }}'
+          work="$(mktemp -d)"
+          published=""
+
+          download_artifact() {
+            local id="$1" dest="$2" token="$GH_TOKEN" attempt
+            for attempt in 1 2; do
+              if GH_TOKEN="$token" gh api "repos/$UPSTREAM_REPO/actions/artifacts/$id/zip" > "$dest.tmp" 2>/dev/null; then
+                case "$(head -c2 "$dest.tmp")" in
+                  PK)
+                    # Zip-wrapped artifact: extract the file(s) next to the temp file.
+                    unzip -o -j "$dest.tmp" -d "$(dirname "$dest")" >/dev/null
+                    rm -f "$dest.tmp"
+                    return 0
+                    ;;
+                  '{'*)
+                    : ;; # API error payload — fall through to retry/fallback
+                  *)
+                    # Artifact served as the raw file itself.
+                    mv "$dest.tmp" "$dest"
+                    return 0
+                    ;;
+                esac
+              fi
+              if [ "$attempt" = 1 ] && [ -n "$MIRROR_TOKEN" ]; then
+                token="$MIRROR_TOKEN"
+              else
+                echo "::error::Failed to download artifact $id. If this persists, set the MIRROR_TOKEN secret to a fine-grained PAT (public repositories, Actions: read-only)." >&2
+                return 1
+              fi
+            done
+            return 1
+          }
+
+          while read -r entry; do
+            version="$(echo "$entry" | jq -r .version)"
+            run_id="$(echo "$entry" | jq -r .run_id)"
+            run_url="$(echo "$entry" | jq -r .url)"
+            created="$(echo "$entry" | jq -r .created)"
+            echo "::group::Mirroring $version (run $run_id)"
+
+            dir="$work/$version"
+            mkdir -p "$dir"
+
+            gh api "repos/$UPSTREAM_REPO/actions/runs/$run_id/artifacts?per_page=100" --paginate \
+              --jq '.artifacts[] | (.id | tostring) + "\t" + .name' \
+              | while IFS=$'\t' read -r id name; do
+                  if echo "$name" | grep -Eq "$SKIP_PATTERN"; then
+                    echo "  skip (not user-facing): $name"
+                    continue
+                  fi
+                  echo "  downloading: $name"
+                  download_artifact "$id" "$dir/$name"
+                done
+
+            cd "$dir"
+            files=()
+            while IFS= read -r f; do files+=("$f"); done < <(find . -maxdepth 1 -type f ! -name '*.tmp' -printf '%f\n' | sort)
+            if [ "${#files[@]}" -eq 0 ]; then
+              echo "::error::No user-facing artifacts found for $version"
+              exit 1
+            fi
+
+            sha256sum "${files[@]}" > SHA256SUMS
+
+            {
+              echo "**Unofficial mirror of the official Ladybird $version build — not affiliated with the Ladybird project.**"
+              echo
+              echo "All files were produced by the upstream project's own CI and are republished here unmodified."
+              echo
+              echo "| File | Size | SHA-256 |"
+              echo "|---|---|---|"
+              for f in "${files[@]}"; do
+                size="$(du -h "$f" | cut -f1)"
+                hash="$(sha256sum "$f" | cut -d' ' -f1)"
+                echo "| \`$f\` | $size | \`$hash\` |"
+              done
+              echo
+              echo "Source: upstream run [$run_id]($run_url) ($created)"
+              echo
+              echo "Install instructions: see the [repository README](https://github.com/$GITHUB_REPOSITORY#installing)."
+              echo
+              echo "> Ladybird is pre-alpha software. Expect broken websites and crashes."
+            } > body.md
+
+            gh release create "$version" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Ladybird $version (unofficial mirror)" \
+              --notes-file body.md \
+              "${files[@]}" SHA256SUMS
+
+            published="$published $version"
+            echo "::endgroup::"
+          done < <(echo "$to_mirror" | jq -c '.[]')
+
+          {
+            echo "### Mirrored releases"
+            echo
+            if [ -n "$published" ]; then
+              for v in $published; do echo "- $v"; done
+            else
+              echo "Nothing new to mirror."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
