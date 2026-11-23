@@ -194,6 +194,13 @@ jobs:
             echo "::endgroup::"
           done < <(echo "$to_mirror" | jq -c '.[]')
 
+          # GitHub marks the most recently created release as "latest"; the loop creates
+          # newest first, so pin "latest" back to the newest version mirrored.
+          newest="$(echo "$to_mirror" | jq -r '.[0].version // empty')"
+          if [ -n "$newest" ]; then
+            gh release edit "$newest" --repo "$GITHUB_REPOSITORY" --latest
+          fi
+
           {
             echo "### Mirrored releases"
             echo
