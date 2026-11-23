@@ -21,8 +21,8 @@ Per upstream release tag:
 
 | Asset | For |
 |---|---|
-| `ladybird_<ver>-1~ubuntu24.04_*.deb` | Ubuntu 24.04 (amd64, arm64) |
-| `ladybird_<ver>-1~ubuntu26.04_*.deb` | Ubuntu 26.04 (amd64, arm64) |
+| `ladybird_<ver>-1.ubuntu24.04_*.deb` | Ubuntu 24.04 (amd64, arm64) |
+| `ladybird_<ver>-1.ubuntu26.04_*.deb` | Ubuntu 26.04 (amd64, arm64) |
 | `ladybird-<ver>-1.fc44.*.rpm` | Fedora 44 (x86_64, aarch64) |
 | `ladybird-<ver>-Linux-*.flatpak` | Any distro with Flatpak (x86_64, aarch64) |
 | `ladybird-<ver>-macOS-arm64.tar.xz` | macOS (Apple Silicon) |
@@ -31,6 +31,11 @@ Per upstream release tag:
 
 Debug-symbol packages and third-party source archives are intentionally not mirrored.
 
+> Note: GitHub replaces `~` with `.` in release asset names, so `.deb` file names here
+> differ slightly from upstream's (`1.ubuntu26.04` instead of `1~ubuntu26.04`). The
+> packages themselves are byte-identical; only the file name changed. `SHA256SUMS` uses
+> the names as downloaded, so verification works as documented below.
+
 ## Installing
 
 > Ladybird is **pre-alpha** software. Expect broken websites, crashes, and missing
@@ -38,7 +43,7 @@ Debug-symbol packages and third-party source archives are intentionally not mirr
 
 **Ubuntu / Debian (.deb):**
 ```sh
-sudo apt install ./ladybird_2026.47.7-1~ubuntu26.04_amd64.deb
+sudo apt install ./ladybird_2026.47.7-1.ubuntu26.04_amd64.deb
 ```
 
 **Fedora (.rpm):**
